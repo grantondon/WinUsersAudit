@@ -8,6 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PARSER = ROOT / "parse_wua_logs.py"
+COLLECTOR = ROOT / "WinUsersAudit.vbs"
 
 
 def escaped(value):
@@ -68,15 +69,24 @@ class ParserTests(unittest.TestCase):
             root = Path(temporary)
             source = root / "in"
             output = root / "out"
-            make_log(source / "nested" / "normal.wua.log", "PC-01_20260909_100000")
+            system_rows = [
+                ["WUA1", "SCHEMA", "SYSTEM", "1", "Идентификатор запуска", "hostname"],
+                ["WUA1", "DATA", "SYSTEM", "1", "PC-01_20260909_100000", "PC-01"],
+            ]
+            make_log(
+                source / "nested" / "normal.wua.log",
+                "PC-01_20260909_100000",
+                extra_rows=system_rows,
+            )
             result = self.run_parser(source, output)
             self.assertEqual(result.returncode, 0, result.stderr)
             expected = {
-                "systems.csv", "users.csv", "password_policies.csv", "interfaces.csv",
+                "users.csv", "password_policies.csv", "interfaces.csv",
                 "routes.csv", "firewall.csv", "netstat.csv", "ping.csv", "http.csv",
                 "diagnostics.csv", "runs.csv", "parser_errors.csv",
             }
             self.assertEqual({path.name for path in output.iterdir()}, expected)
+            self.assertFalse((output / "systems.csv").exists())
             users = read_csv(output / "users.csv")
             self.assertEqual(len(users), 2)
             header, row = users
@@ -181,6 +191,21 @@ class ParserTests(unittest.TestCase):
             result = self.run_parser(root, root / "out", "--all", "--latest")
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("not allowed", result.stderr)
+
+    def test_collector_uses_compatible_system_query_and_single_ping_row(self):
+        source = COLLECTOR.read_text(encoding="utf-16")
+        self.assertIn('ExecQuery("SELECT * FROM Win32_OperatingSystem")', source)
+        self.assertNotIn(
+            'SELECT Caption,Version,BuildNumber,CSDVersion,OSArchitecture FROM Win32_OperatingSystem',
+            source,
+        )
+        ping_block = source.split("Sub CollectUnifiedPingTarget", 1)[1].split("End Sub", 1)[0]
+        self.assertNotIn('"ПОПЫТКА"', ping_block)
+        self.assertNotIn('"ИТОГ"', ping_block)
+        self.assertEqual(ping_block.count('WriteData "PING", "2"'), 2)
+        user_block = source.split("Sub CollectUnifiedUsers", 1)[1].split("End Sub", 1)[0]
+        self.assertIn("Максимальный срок действия пароля (дней, политика)", user_block)
+        self.assertIn('WriteData "USER", "2"', user_block)
 
 
 if __name__ == "__main__":

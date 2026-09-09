@@ -36,7 +36,6 @@ EVENT_COLUMNS = [
 ]
 OUTPUTS = OrderedDict(
     [
-        ("SYSTEM", "systems.csv"),
         ("USER", "users.csv"),
         ("PASSWORD_POLICY", "password_policies.csv"),
         ("INTERFACE", "interfaces.csv"),
@@ -48,6 +47,8 @@ OUTPUTS = OrderedDict(
         ("EVENT", "diagnostics.csv"),
     ]
 )
+KNOWN_DATA_TYPES = set(OUTPUTS) | {"SYSTEM"}
+RUN_COUNT_TYPES = ["SYSTEM"] + list(OUTPUTS)
 
 
 @dataclass
@@ -254,7 +255,7 @@ def parse_log(path: Path) -> Run:
             ordinal += 1
             run.records.append(DataRecord(data_type, version, schema, values, ordinal))
             run.counts[data_type] += 1
-            if data_type not in OUTPUTS:
+            if data_type not in KNOWN_DATA_TYPES:
                 add_issue(run, line_number, data_type, "WARNING", "Неизвестный тип DATA пропущен при экспорте", raw)
         elif kind == "EVENT":
             if len(row) != 10:
@@ -374,7 +375,7 @@ def write_data_outputs(output_dir: Path, runs: List[Run]) -> None:
 
 
 def write_runs(output_dir: Path, runs: List[Run]) -> None:
-    count_types = list(OUTPUTS)
+    count_types = RUN_COUNT_TYPES
     columns = [
         "Идентификатор запуска",
         "hostname",
