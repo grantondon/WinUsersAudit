@@ -1,7 +1,6 @@
 # Local development and validation
 
-main is the only active development branch. unified-report is archived under
-archives/ and must not be developed or merged unless explicitly requested.
+Development is performed in the `main` branch.
 
 1. Check the current branch, origin and local changes before editing.
 2. Edit the local checkout. Preserve UTF-16 LE with BOM for VBS and TXT files.
