@@ -47,6 +47,18 @@ foreach ($entry in $expected.GetEnumerator()) {
 }
 $diag = Join-Path $runRoot ($env:COMPUTERNAME + '_diag.log')
 if (-not (Test-Path -LiteralPath $diag)) { throw 'Diagnostic log missing.' }
+$diagText = [IO.File]::ReadAllText($diag, [Text.Encoding]::Unicode)
+foreach ($marker in @(
+    'WinUsersAudit: diagnostic revision 20',
+    '--- Синхронизация времени Windows ---',
+    'Служба Windows Time (W32Time):',
+    'Режим синхронизации (Type):',
+    'Настроенные NTP-серверы:',
+    'Итог:',
+    '--- Конец синхронизации времени Windows ---'
+)) {
+    if (-not $diagText.Contains($marker)) { throw "Diagnostic marker missing: $marker" }
+}
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [IO.Compression.ZipFile]::OpenRead((Join-Path $runRoot ($env:COMPUTERNAME + '.zip')))
 try {
