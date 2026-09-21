@@ -1,0 +1,10 @@
+.local-validation/
+*_user.csv
+*_int.csv
+*_route.csv
+*_netstat.csv
+*_software.csv
+*_diag.log
+/*.zip
+__pycache__/
+*.py[cod]
