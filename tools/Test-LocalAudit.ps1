@@ -49,13 +49,18 @@ $diag = Join-Path $runRoot ($env:COMPUTERNAME + '_diag.log')
 if (-not (Test-Path -LiteralPath $diag)) { throw 'Diagnostic log missing.' }
 $diagText = [IO.File]::ReadAllText($diag, [Text.Encoding]::Unicode)
 foreach ($marker in @(
-    'WinUsersAudit: diagnostic revision 20',
+    'WinUsersAudit: diagnostic revision 21',
     '--- Синхронизация времени Windows ---',
     'Служба Windows Time (W32Time):',
     'Режим синхронизации (Type):',
     'Настроенные NTP-серверы:',
     'Итог:',
-    '--- Конец синхронизации времени Windows ---'
+    '--- Конец синхронизации времени Windows ---',
+    '--- Локальная политика аудита Windows ---',
+    'Источник политик безопасности:',
+    'Аудит системных событий:',
+    'Аудит событий входа в учётную запись:',
+    '--- Конец локальной политики аудита Windows ---'
 )) {
     if (-not $diagText.Contains($marker)) { throw "Diagnostic marker missing: $marker" }
 }
