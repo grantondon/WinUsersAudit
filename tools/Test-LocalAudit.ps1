@@ -50,6 +50,7 @@ if (-not (Test-Path -LiteralPath $diag)) { throw 'Diagnostic log missing.' }
 $diagText = [IO.File]::ReadAllText($diag, [Text.Encoding]::Unicode)
 foreach ($marker in @(
     'WinUsersAudit: diagnostic revision 21',
+    'Версия WinUsersAudit: 1.0.0',
     '--- Синхронизация времени Windows ---',
     'Служба Windows Time (W32Time):',
     'Режим синхронизации (Type):',
