@@ -1,29 +1,39 @@
-# Local development and validation
+# Локальная разработка и проверка
 
-Development is performed in the `main` branch.
+Разработка выполняется в ветке `main`.
 
-1. Check the current branch, origin and local changes before editing.
-2. Edit the local checkout. Preserve UTF-16 LE with BOM for VBS and TXT files.
-3. Run `tools/Test-LocalAudit.ps1` on this computer from elevated PowerShell.
-   PowerShell is a development helper only, never a collector dependency.
-4. Inspect console output, all five CSV files and the diagnostic log in the
-   printed validation directory. Explain every warning or unavailable value.
-5. Require exit code zero, valid CSV headers and a readable ZIP containing
-   the five current CSV files and the diagnostic log. Check the changed
-   functionality separately; file existence alone is not success.
-6. Fix failures and repeat the local run. Do not commit or push an unverified
-   collector change. Confirm its SHA256 still matches the successful run.
-7. Commit only reviewed source, documentation, tests and intentional archives.
-   Push main only after the checks pass. Never upload local audit results.
+1. Перед изменением проверьте текущую ветку, удалённый репозиторий и локальные
+   изменения.
+2. Редактируйте локальную копию. Для файлов VBS и TXT сохраняйте кодировку
+   UTF-16 LE с BOM.
+3. На компьютере с Windows запустите `tools/Test-LocalAudit.ps1` из
+   PowerShell, открытого с повышенными правами.
+   PowerShell используется только как вспомогательное средство разработки и не
+   является зависимостью сборщика.
+4. Проверьте вывод консоли, все пять CSV-файлов и диагностический журнал в
+   указанном сценариями каталоге проверки. Объясните каждое предупреждение и
+   каждое недоступное значение.
+5. Убедитесь, что код завершения равен нулю, заголовки CSV корректны, а ZIP
+   открывается и содержит пять текущих CSV-файлов и диагностический журнал.
+   Изменённую функциональность проверяйте отдельно: одного наличия файлов
+   недостаточно.
+6. Исправляйте ошибки и повторяйте запуск. Не коммитьте и не публикуйте
+   непроверенное изменение сборщика. Сверяйте SHA-256 скрипта с успешно
+   запущенным экземпляром.
+7. Коммитьте только проверенные исходники, документацию, тесты и
+   преднамеренно добавленные служебные материалы. Не загружайте в GitHub
+   локальные отчёты аудита.
 
-The helper performs structural checks, not a complete semantic audit. Human
-or agent review of diagnostics is required before publishing. This workflow
-is a project rule, not a server-enforced GitHub branch protection.
+Вспомогательный сценарий выполняет структурные проверки, но не заменяет
+полноценный анализ результатов. Перед публикацией нужен ручной или агентный
+разбор диагностического журнала. Это правило проекта, а не серверная защита
+ветки на GitHub.
 
-Validation artifacts are isolated in .local-validation/ and ignored by Git.
-The ZIP copy of diagnostics may be shorter than the final external log because
-the existing collector appends archive results after copying diagnostics.
+Артефакты проверки сохраняются в `.local-validation/` и игнорируются Git.
+Копия журнала внутри ZIP может быть короче итогового внешнего журнала, так как
+сборщик дописывает в него результат архивации уже после добавления в ZIP.
 
-A successful run on this computer does not prove XP/Server 2003 compatibility.
-GitHub Desktop can open this checkout. CLI Git authentication is separate and
-must be verified; never place access tokens in repository files or remote URLs.
+Успешный запуск на одном компьютере не доказывает совместимость с Windows XP и
+Windows Server 2003. GitHub Desktop может открывать этот репозиторий. Учётные
+данные Git для командной строки настраиваются отдельно; не сохраняйте токены
+доступа в файлах репозитория или в URL удалённого репозитория.
