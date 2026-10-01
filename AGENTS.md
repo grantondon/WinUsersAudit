@@ -59,6 +59,7 @@
 - `secedit.exe`;
 - `netstat.exe`;
 - `route.exe`, если нужен резервный способ;
+- `arp.exe` для пассивного снимка текущего ARP-кэша;
 - `ping.exe` там, где он уже используется;
 - `WinHttp.WinHttpRequest.5.1`;
 - `HNetCfg.FwPolicy2`;

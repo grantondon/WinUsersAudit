@@ -61,10 +61,19 @@ foreach ($marker in @(
     'Источник политик безопасности:',
     'Аудит системных событий:',
     'Аудит событий входа в учётную запись:',
-    '--- Конец локальной политики аудита Windows ---'
+    '--- Конец локальной политики аудита Windows ---',
+    '=== ARP-кэш ===',
+    'Кодировка вывода arp.exe:',
+    '--- Конец ARP-кэша ---'
 )) {
     if (-not $diagText.Contains($marker)) { throw "Diagnostic marker missing: $marker" }
 }
+$arpStart = $diagText.IndexOf('=== ARP-кэш ===')
+$arpEnd = $diagText.IndexOf('--- Конец ARP-кэша ---', $arpStart)
+if ($arpStart -lt 0 -or $arpEnd -le $arpStart) { throw 'Invalid ARP diagnostic section.' }
+$arpSection = $diagText.Substring($arpStart, $arpEnd - $arpStart)
+if (-not $arpSection.Contains('Код завершения arp.exe: 0')) { throw 'ARP command did not complete successfully.' }
+if ($arpSection.Contains('Вывод arp.exe пуст')) { throw 'ARP command returned no output.' }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [IO.Compression.ZipFile]::OpenRead((Join-Path $runRoot ($env:COMPUTERNAME + '.zip')))
 try {
@@ -79,6 +88,7 @@ try {
             $actual = $memory.ToArray()
             $original = [IO.File]::ReadAllBytes((Join-Path $runRoot $name))
             if ($name.EndsWith('.csv') -and [Convert]::ToBase64String($actual) -cne [Convert]::ToBase64String($original)) { throw "ZIP content differs: $name" }
+            if ($name.EndsWith('_diag.log') -and -not [Text.Encoding]::Unicode.GetString($actual).Contains('=== ARP-кэш ===')) { throw "ZIP diagnostic entry lacks ARP section: $name" }
             if ($actual.Length -eq 0) { throw "Empty ZIP entry: $name" }
         } finally { $inputStream.Dispose(); $memory.Dispose() }
     }
