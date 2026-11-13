@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import csv
 import io
+import ipaddress
 import os
+import re
 import sys
 import zipfile
 from collections import Counter
@@ -59,6 +61,14 @@ CSV_SPECS = {
     ],
 }
 
+DIAG_COLUMNS = [
+    "hostname", "Версия ОС", "Принадлежность к домену или рабочей группе",
+    "Роль компьютера", "Многоногость", "Интернет (ping)", "Интернет (http)",
+    "Производитель", "Модель", "Оперативная память", "NTP",
+    "Автоматическая защита сеанса",
+]
+UNKNOWN = "Не определено"
+
 
 class CsvValidationError(Exception):
     """The member is not a compatible WinUsersAudit CSV."""
@@ -76,7 +86,7 @@ class SheetWriter:
     def __init__(self, workbook: Workbook, report_type: str) -> None:
         self.workbook = workbook
         self.report_type = report_type
-        self.header = ["Папка", *CSV_SPECS[report_type]]
+        self.header = ["Папка", *(DIAG_COLUMNS if report_type == "diag" else CSV_SPECS[report_type])]
         self.sheets = []
         self.current = None
         self.current_rows = 0
@@ -198,6 +208,177 @@ def add_message(messages: list[Message], level: str, archive: Path, member: str,
     messages.append(Message(level, archive.as_posix(), member, text))
 
 
+def multihomed(rows: list[list[str]]) -> str:
+    networks = set()
+    uncertain = False
+    inactive = {"отключено", "оборудование отсутствует", "оборудование отключено",
+                "неисправность оборудования", "сетевой кабель не подключён"}
+    for row in rows:
+        status = row[5].strip().casefold()
+        if status not in ("подключено", "подключен", "подключён"):
+            if status not in inactive:
+                uncertain = True
+            continue
+        addresses = [v.strip() for v in row[7].split(",") if v.strip()]
+        masks = [v.strip() for v in row[8].split(",") if v.strip()]
+        if not addresses and not masks and row[6].strip().casefold() == "нет":
+            continue
+        if not addresses or len(addresses) != len(masks):
+            uncertain = True
+            continue
+        for address, mask in zip(addresses, masks):
+            try:
+                ip = ipaddress.ip_address(address.split("%", 1)[0])
+                if ip.version == 6:
+                    continue
+                if ip.is_unspecified:
+                    uncertain = True
+                    continue
+                networks.add(ipaddress.IPv4Network((address, mask), strict=False))
+            except ValueError:
+                uncertain = True
+    if len(networks) >= 2:
+        return "Да"
+    return UNKNOWN if uncertain else "Нет"
+
+
+def log_value(lines: list[str], key: str) -> str:
+    values = [line[len(key):].strip() for line in lines if line.startswith(key)]
+    return values[0] if len(values) == 1 and values[0] else UNKNOWN
+
+
+def log_section(lines: list[str], start: str, end: str) -> list[str]:
+    try:
+        first = lines.index(start)
+        last = lines.index(end, first + 1)
+        return lines[first + 1:last]
+    except ValueError:
+        return []
+
+
+def internet_result(lines: list[str], protocol: str) -> str:
+    prefix = "PING " if protocol == "ping" else "HTTP "
+    entries = [line for line in lines if line.startswith(prefix)]
+    if protocol == "ping":
+        if any(line.endswith(": успешно") for line in entries):
+            return "Есть"
+        failures = [line for line in entries if re.search(r": нет ответа, код -?\d+$", line)]
+    else:
+        if any(re.search(r": ответ получен, статус \d+$", line) for line in entries):
+            return "Есть"
+        failures = [line for line in entries if ": ошибка, код " in line or ": недопустимый статус " in line]
+    targets = {line.split(": ", 1)[0] for line in failures}
+    return "Нет" if len(entries) == 5 and len(targets) == 5 and len(failures) == 5 else UNKNOWN
+
+
+def ntp_result(lines: list[str]) -> str:
+    service = log_value(lines, "Служба Windows Time (W32Time): ")
+    if re.search(r"(?:^|;\s*)запуск=Disabled(?:;|$)", service, re.I):
+        return "Служба отключена"
+    mode = log_value(lines, "Режим синхронизации (Type): ").split(";", 1)[0].strip().upper()
+    if mode == "NOSYNC":
+        return "Синхронизация отсутствует"
+    source = log_value(lines, "Текущий источник времени: ")
+    if source.casefold() in ("local cmos clock", "локальные часы cmos"):
+        return "Синхронизация отсутствует"
+    # A reported source alone does not prove a successful exchange.
+    if source != UNKNOWN and any(re.search(r"(?:Last Successful Sync Time|Время последней успешной синхронизации):\s*\d", line, re.I) for line in lines):
+        return "Синхронизация работает"
+    return UNKNOWN
+
+
+def session_result(lines: list[str], interactive_user: str) -> str:
+    if not lines or interactive_user == UNKNOWN:
+        return UNKNOWN
+    profiles = []
+    current = None
+    for line in lines:
+        if line.startswith("Пользователь: "):
+            current = [line[len("Пользователь: "):].strip()]
+            profiles.append(current)
+        elif current is not None:
+            current.append(line.strip())
+    matching = [p for p in profiles if p[0].casefold() == interactive_user.casefold()]
+    if len(matching) != 1:
+        return UNKNOWN
+    profile = matching[0]
+    secure = log_value(profile[1:], "Защищенная заставка: ")
+    match = re.match(r"срабатывает через (\d+) секунд", secure)
+    if match and int(match.group(1)) > 0:
+        seconds = int(match.group(1))
+        minutes, remaining = divmod(seconds, 60)
+        duration = (f"{minutes} мин" if minutes else "") + (f" {remaining} сек" if remaining else "")
+        return f"Включена ({duration.strip()}, пароль)"
+    machine = log_value(lines, "Системный тайм-аут бездействия: ")
+    active = log_value(profile[1:], "Заставка включена: ").split(";", 1)[0].strip()
+    password = log_value(profile[1:], "Запрос учетных данных: ").split(";", 1)[0].strip()
+    if (machine in ("не настроен", "отключен (0)") or machine.startswith("не поддерживается")) and (active == "Нет" or password == "Нет"):
+        return "Не настроена"
+    return UNKNOWN
+
+
+def build_diag(zip_file, log_member, selected, valid, folder, archive, messages):
+    try:
+        with zip_file.open(log_member) as stream:
+            if stream.read(2) != b"\xff\xfe":
+                raise ValueError("ожидалась кодировка UTF-16 LE с BOM")
+            lines = io.TextIOWrapper(stream, encoding="utf-16-le", errors="strict").read().splitlines()
+    except (ValueError, UnicodeError, OSError, zipfile.BadZipFile) as exc:
+        add_message(messages, "Ошибка", archive, log_member.filename, f"Лог недоступен: {exc}")
+        lines = []
+    host = log_value(lines, "Компьютер: ")
+    version = UNKNOWN
+    interfaces = None
+    for kind in ("user", "int"):
+        # Associate CSV with this log, not merely with the enclosing archive.
+        expected = log_member.filename[:-len("_diag.log")] + f"_{kind}.csv"
+        matches = [item for item in zip_file.infolist() if not item.is_dir() and item.filename.casefold() == expected.casefold()]
+        if len(matches) != 1:
+            add_message(messages, "Предупреждение", archive, expected, "Соответствующий CSV отсутствует или неоднозначен")
+            continue
+        member = matches[0]
+        try:
+            if selected.get(kind) is not member or kind not in valid:
+                validate_csv(zip_file, member, kind)
+        except CsvValidationError as exc:
+            add_message(messages, "Ошибка", archive, member.filename, f"CSV для diag недоступен: {exc}")
+            continue
+        rows = list(csv_rows(zip_file, member))[1:]
+        rows = [row for row in rows if row and any(row)]
+        row_hosts = {row[0].strip().casefold() for row in rows if row[0].strip()}
+        if host != UNKNOWN and row_hosts and row_hosts != {host.casefold()}:
+            add_message(messages, "Предупреждение", archive, member.filename, "hostname CSV не совпадает с диагностическим логом")
+            continue
+        if host == UNKNOWN and len(row_hosts) == 1:
+            host = next(row[0].strip() for row in rows if row[0].strip())
+        if kind == "int":
+            if rows or log_value(lines, "Обнаружено сетевых интерфейсов: ") == "0":
+                interfaces = rows
+        else:
+            versions = {row[1].strip() for row in rows if row[1].strip() and row[1].strip() != UNKNOWN}
+            if len(versions) == 1:
+                version = versions.pop()
+    membership = log_value(lines, "Принадлежность к домену или рабочей группе: ")
+    if membership.startswith("домен ") and membership[6:].strip():
+        membership = "Домен: " + membership[6:].strip()
+    elif membership.startswith("рабочая группа ") and membership[15:].strip():
+        membership = "Рабочая группа: " + membership[15:].strip()
+    else:
+        membership = UNKNOWN
+    role = log_value(lines, "Роль компьютера: ")
+    role = next((value for prefix, value in (("рабочая станция", "Рабочая станция"), ("рядовой сервер", "Сервер"), ("контроллер домена", "Контроллер домена")) if role.startswith(prefix)), UNKNOWN)
+    memory = log_value(lines, "Оперативная память: ")
+    memory_match = re.match(r"^(\d+) байт", memory)
+    memory = (f"{int(memory_match.group(1)) / 1073741824:.2f}".rstrip("0").rstrip(".") + " ГБ") if memory_match else UNKNOWN
+    internet = log_section(lines, "--- Проверка доступности Интернета ---", "--- Конец проверки доступности Интернета ---")
+    ntp = log_section(lines, "--- Синхронизация времени Windows ---", "--- Конец синхронизации времени Windows ---")
+    session = log_section(lines, "--- Автоматическая защита сеанса ---", "--- Конец проверки автоматической защиты сеанса ---")
+    return [host, version, membership, role, multihomed(interfaces) if interfaces is not None else UNKNOWN,
+            internet_result(internet, "ping"), internet_result(internet, "http"),
+            log_value(lines, "Производитель: "), log_value(lines, "Модель: "), memory,
+            ntp_result(ntp), session_result(session, log_value(lines, "Текущий интерактивный пользователь: "))]
+
+
 def process_archive(
     archive: Path,
     base_dir: Path,
@@ -231,6 +412,7 @@ def process_archive(
                     continue
                 selected[report_type] = member
 
+            valid = set()
             for report_type in CSV_SPECS:
                 member = selected.get(report_type)
                 if member is None:
@@ -238,6 +420,7 @@ def process_archive(
                     continue
                 try:
                     row_count = validate_csv(zip_file, member, report_type)
+                    valid.add(report_type)
                     append_csv(zip_file, member, report_type, folder, writers[report_type], computers)
                     add_message(messages, "Успешно", archive, member.filename, f"объединено строк: {row_count}")
                 except CsvValidationError as exc:
@@ -246,6 +429,19 @@ def process_archive(
                 except Exception as exc:  # Do not let one member stop the audit set.
                     has_errors = True
                     add_message(messages, "Ошибка", archive, member.filename, f"CSV пропущен: {type(exc).__name__}: {exc}")
+            logs = [member for member in zip_file.infolist() if not member.is_dir() and member.filename.lower().endswith("_diag.log")]
+            if not logs:
+                add_message(messages, "Предупреждение", archive, "", "Диагностический лог отсутствует")
+            for log_member in logs:
+                try:
+                    before = len(messages)
+                    writers["diag"].append(folder, build_diag(zip_file, log_member, selected, valid, folder, archive, messages))
+                    if any(message.level == "Ошибка" for message in messages[before:]):
+                        has_errors = True
+                except Exception as exc:
+                    has_errors = True
+                    add_message(messages, "Ошибка", archive, log_member.filename, f"Ошибка разбора диагностики: {type(exc).__name__}: {exc}")
+                    writers["diag"].append(folder, [UNKNOWN] * len(DIAG_COLUMNS))
             return True, has_errors
     except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
         add_message(messages, "Ошибка", archive, "", f"ZIP не обработан: {type(exc).__name__}: {exc}")
@@ -280,7 +476,7 @@ def write_summary(
     sheet.append(["Уникальных компьютеров", len(computers)])
     sheet.append([])
     sheet.append(["Тип CSV", "Собрано строк", "Создано листов"])
-    for report_type in CSV_SPECS:
+    for report_type in (*CSV_SPECS, "diag"):
         writer = writers[report_type]
         sheet.append([report_type, writer.total_rows, len(writer.sheets)])
 
@@ -303,6 +499,7 @@ def main() -> int:
 
     workbook = Workbook(write_only=True)
     writers = {report_type: SheetWriter(workbook, report_type) for report_type in CSV_SPECS}
+    writers["diag"] = SheetWriter(workbook, "diag")
     computers: set[str] = set()
     messages: list[Message] = []
     folder_stats: Counter[str] = Counter(relative_folder(base_dir, archive) for archive in archives)
