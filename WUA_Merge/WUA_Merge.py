@@ -65,7 +65,7 @@ DIAG_COLUMNS = [
     "hostname", "Версия ОС", "Принадлежность к домену или рабочей группе",
     "Роль компьютера", "Многоногость", "Интернет (ping)", "Интернет (http)",
     "Производитель", "Модель", "Оперативная память", "NTP",
-    "Автоматическая защита сеанса",
+    "Автоматическая защита сеанса", "Ошибки прав доступа",
 ]
 UNKNOWN = "Не определено"
 
@@ -91,6 +91,7 @@ class SheetWriter:
         self.current = None
         self.current_rows = 0
         self.total_rows = 0
+        self.access_counts = Counter()
         self._new_sheet()
 
     def _new_sheet(self) -> None:
@@ -119,6 +120,8 @@ class SheetWriter:
         self.current.append([safe_excel_text(folder), *map(safe_excel_text, row)])
         self.current_rows += 1
         self.total_rows += 1
+        if self.report_type == "diag":
+            self.access_counts[row[-1]] += 1
 
     def finalize(self) -> None:
         for sheet in self.sheets:
@@ -317,6 +320,32 @@ def session_result(lines: list[str], interactive_user: str) -> str:
     return UNKNOWN
 
 
+def access_errors(lines: list[str]) -> str:
+    # Examine collector error records, not paths, data values or secedit output.
+    in_secedit_log = False
+    for line in lines:
+        if line.startswith("--- Журнал secedit"):
+            in_secedit_log = True
+            continue
+        if in_secedit_log:
+            if line.startswith(("Этап:", "--- Конец журнала secedit")):
+                in_secedit_log = False
+            else:
+                continue
+        if re.match(r"^Код завершения secedit:\s*(?:5|740)\s*$", line, re.I):
+            return "Есть"
+        if not re.search(r"ошибк|не удалось|недоступен|недоступна|завершился с кодом", line, re.I):
+            continue
+        if re.search(r"\b(?:access denied|permission denied|отказано в доступе|требуется повышение прав|требуются права администратора)\b", line, re.I):
+            return "Есть"
+        if re.search(r"(?:код(?: ошибки)?\s*[:=]?\s*)(?:-2147024891|-2147217405|0x80070005|0x80041003|740)(?![\da-f])", line, re.I):
+            return "Есть"
+    # ZIP copy is normally taken before the final completion marker is written.
+    valid_start = any(re.fullmatch(r"WinUsersAudit: diagnostic revision \d+", line) for line in lines)
+    has_progress = any(line == "Основные этапы сбора завершены" for line in lines)
+    return "Нет" if valid_start and has_progress else UNKNOWN
+
+
 def build_diag(zip_file, log_member, selected, valid, folder, archive, messages):
     try:
         with zip_file.open(log_member) as stream:
@@ -376,7 +405,8 @@ def build_diag(zip_file, log_member, selected, valid, folder, archive, messages)
     return [host, version, membership, role, multihomed(interfaces) if interfaces is not None else UNKNOWN,
             internet_result(internet, "ping"), internet_result(internet, "http"),
             log_value(lines, "Производитель: "), log_value(lines, "Модель: "), memory,
-            ntp_result(ntp), session_result(session, log_value(lines, "Текущий интерактивный пользователь: "))]
+            ntp_result(ntp), session_result(session, log_value(lines, "Текущий интерактивный пользователь: ")),
+            access_errors(lines)]
 
 
 def process_archive(
@@ -474,6 +504,8 @@ def write_summary(
     sheet.append(["Успешно обработано ZIP", processed_archives])
     sheet.append(["Архивов с ошибками", archives_with_errors])
     sheet.append(["Уникальных компьютеров", len(computers)])
+    for result in ("Есть", "Нет", UNKNOWN):
+        sheet.append([f"Ошибки прав доступа: {result}", writers["diag"].access_counts[result]])
     sheet.append([])
     sheet.append(["Тип CSV", "Собрано строк", "Создано листов"])
     for report_type in (*CSV_SPECS, "diag"):
