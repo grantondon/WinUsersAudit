@@ -86,7 +86,7 @@ class SheetWriter:
     def __init__(self, workbook: Workbook, report_type: str) -> None:
         self.workbook = workbook
         self.report_type = report_type
-        self.header = ["Папка", *(DIAG_COLUMNS if report_type == "diag" else CSV_SPECS[report_type])]
+        self.header = ["Папка", *(DIAG_COLUMNS if report_type == "diag" else [*CSV_SPECS[report_type], "Ошибки прав доступа"])]
         self.sheets = []
         self.current = None
         self.current_rows = 0
@@ -191,13 +191,14 @@ def append_csv(
     folder: str,
     writer: SheetWriter,
     computers: set[str],
+    access_status: str,
 ) -> None:
     rows = csv_rows(zip_file, member)
     next(rows)  # Header was already checked by validate_csv.
     for row in rows:
         if not row or all(value == "" for value in row):
             continue
-        writer.append(folder, row)
+        writer.append(folder, [*row, access_status])
         if row[0]:
             computers.add(row[0])
 
@@ -409,6 +410,44 @@ def build_diag(zip_file, log_member, selected, valid, folder, archive, messages)
             access_errors(lines)]
 
 
+def category_errors(lines: list[str]) -> dict[str, str]:
+    stages = {
+        "получение парольной политики и локальной политики аудита": "user",
+        "получение сведений о пользователях через ADSI WinNT": "user",
+        "формирование отчета локальных пользователей": "user",
+        "формирование отчета сетевых интерфейсов": "int",
+        "формирование таблицы маршрутизации": "route",
+        "формирование отчета прослушиваемых портов и соединений": "netstat",
+        "формирование отчета установленного ПО": "software",
+    }
+    needed = {kind: {name for name, value in stages.items() if value == kind} for kind in CSV_SPECS}
+    finished = set()
+    errors = {kind: [] for kind in CSV_SPECS}
+    current = None
+    for line in lines:
+        if line.startswith("Этап: "):
+            current = line[6:]
+            continue
+        if current and line.startswith("Длительность этапа '" + current + "':"):
+            finished.add(current)
+            current = None
+            continue
+        kind = stages.get(current)
+        if not kind:
+            continue
+        secedit = re.fullmatch(r"Код завершения secedit:\s*(5|740)\s*", line, re.I)
+        if secedit:
+            description = f"secedit: код {secedit.group(1)} — " + ("требуется повышение прав" if secedit.group(1) == "740" else "отказано в доступе")
+        elif re.search(r"ошибк|не удалось|недоступен|недоступна", line, re.I) and re.search(r"access denied|permission denied|отказано в доступе|требуется повышение прав|код\s*[:=]?\s*(?:-2147024891|-2147217405|0x80070005|0x80041003|740)(?![\da-f])", line, re.I):
+            description = line.strip()[:1000]
+        else:
+            continue
+        if description not in errors[kind]:
+            errors[kind].append(description)
+    valid = any(re.fullmatch(r"WinUsersAudit: diagnostic revision \d+", line) for line in lines)
+    return {kind: "; ".join(errors[kind]) if errors[kind] else ("Нет" if valid and needed[kind] <= finished else UNKNOWN) for kind in CSV_SPECS}
+
+
 def process_archive(
     archive: Path,
     base_dir: Path,
@@ -442,6 +481,7 @@ def process_archive(
                     continue
                 selected[report_type] = member
 
+            category_cache = {}
             valid = set()
             for report_type in CSV_SPECS:
                 member = selected.get(report_type)
@@ -451,7 +491,24 @@ def process_archive(
                 try:
                     row_count = validate_csv(zip_file, member, report_type)
                     valid.add(report_type)
-                    append_csv(zip_file, member, report_type, folder, writers[report_type], computers)
+                    log_name = member.filename[:-len(f"_{report_type}.csv")] + "_diag.log"
+                    matches = [item for item in zip_file.infolist() if not item.is_dir() and item.filename.casefold() == log_name.casefold()]
+                    access_status = UNKNOWN
+                    if len(matches) == 1:
+                        log = matches[0]
+                        if log.header_offset not in category_cache:
+                            try:
+                                with zip_file.open(log) as stream:
+                                    if stream.read(2) != b"\xff\xfe":
+                                        raise ValueError("ожидалась UTF-16 LE с BOM")
+                                    lines = io.TextIOWrapper(stream, encoding="utf-16-le", errors="strict").read().splitlines()
+                                category_cache[log.header_offset] = category_errors(lines)
+                            except (ValueError, UnicodeError, OSError, zipfile.BadZipFile) as exc:
+                                category_cache[log.header_offset] = {}
+                                add_message(messages, "Ошибка", archive, log.filename, f"Лог для анализа категорий недоступен: {exc}")
+                                has_errors = True
+                        access_status = category_cache[log.header_offset].get(report_type, UNKNOWN)
+                    append_csv(zip_file, member, report_type, folder, writers[report_type], computers, access_status)
                     add_message(messages, "Успешно", archive, member.filename, f"объединено строк: {row_count}")
                 except CsvValidationError as exc:
                     has_errors = True
